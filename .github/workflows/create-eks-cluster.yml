@@ -1,0 +1,75 @@
+name: Deploy EKS Cluster with Airflow and Spark
+
+on:
+  workflow_dispatch:  # 수동으로 트리거되는 워크플로우
+
+jobs:
+  deploy-eks-cluster:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    - name: Set up Python environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.8'
+
+    - name: Install AWS CDK
+      run: |
+        cd cdk  # CDK 코드가 위치한 디렉토리로 이동
+        python3 -m pip install -r requirements.txt  # CDK 의존성 설치
+
+    - name: Deploy EKS Cluster with CDK
+      run: |
+        cd cdk
+        cdk deploy --require-approval never  # CDK로 클러스터 배포
+
+    - name: Set up kubeconfig
+      run: |
+        aws eks update-kubeconfig --name ${{ secrets.CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+
+    - name: Install Helm
+      run: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3.sh | bash
+
+    - name: Install Airflow via Helm
+      run: |
+        helm repo add apache-airflow https://airflow.apache.org
+        helm repo update
+        helm install airflow apache-airflow/airflow \
+          --namespace airflow \
+          --create-namespace \
+          --set dags.persistence.enabled=true \
+          --set dags.persistence.existingClaim=${{ secrets.AIRFLOW_DAG_BUCKET }} \
+          --set airflow.executor=CeleryExecutor \
+          --set airflow.image.repository=apache/airflow
+
+    - name: Install Spark via Helm
+      run: |
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        helm repo update
+        helm install spark bitnami/spark \
+          --namespace spark \
+          --create-namespace \
+          --set spark.master=k8s://https://kubernetes.default.svc \
+          --set spark.worker.instances=2
+
+    - name: Mount Airflow DAG and Spark Job Code
+      run: |
+        kubectl apply -f ./airflow/dags/  # Airflow DAG 파일을 Kubernetes로 배포
+        kubectl apply -f ./spark/jobs/    # Spark Job 파일을 Kubernetes로 배포
+
+    - name: Verify Deployment
+      run: |
+        kubectl get pods --namespace airflow
+        kubectl get pods --namespace spark
+        echo "Deployment Complete!"
